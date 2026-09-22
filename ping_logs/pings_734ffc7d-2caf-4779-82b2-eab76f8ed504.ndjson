@@ -1,0 +1,5 @@
+{"participant_uuid":"734ffc7d-2caf-4779-82b2-eab76f8ed504","event_type":"ping","client_time":"2026-09-17T09:52:29.161000+00:00","client_ip":"127.0.0.1","server_received":"2026-09-17T09:52:29.168968+00:00","code_issued":"DNFTF4"}
+{"participant_uuid":"734ffc7d-2caf-4779-82b2-eab76f8ed504","event_type":"ping","client_time":"2026-09-17T09:52:34.158000+00:00","client_ip":"127.0.0.1","server_received":"2026-09-17T09:52:34.161291+00:00","code_issued":null}
+{"participant_uuid":"734ffc7d-2caf-4779-82b2-eab76f8ed504","event_type":"ping","client_time":"2026-09-17T09:52:39.158000+00:00","client_ip":"127.0.0.1","server_received":"2026-09-17T09:52:39.161275+00:00","code_issued":null}
+{"participant_uuid":"734ffc7d-2caf-4779-82b2-eab76f8ed504","event_type":"ping","client_time":"2026-09-17T09:52:44.158000+00:00","client_ip":"127.0.0.1","server_received":"2026-09-17T09:52:44.161962+00:00","code_issued":null}
+{"participant_uuid":"734ffc7d-2caf-4779-82b2-eab76f8ed504","event_type":"ping","client_time":"2026-09-17T09:52:49.159000+00:00","client_ip":"127.0.0.1","server_received":"2026-09-17T09:52:49.161713+00:00","code_issued":null}
