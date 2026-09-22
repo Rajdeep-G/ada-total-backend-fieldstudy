@@ -14,6 +14,7 @@ from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from enum import Enum
 
 
 # ============================================================
@@ -261,6 +262,16 @@ class SurveySubmitIn(BaseModel):
     answers: Dict[str, Any]
 
 
+
+# ============================================================
+#  Log Folder Enum for download-logs/{folder} route
+# ============================================================
+
+class LogFolder(str, Enum):
+    events = "events"    # EVENT_LOG_DIR
+    pings  = "pings"     # PING_LOG_DIR
+    survey = "survey"    # SURVEY_DATA_DIR
+    codes  = "codes"     # CODES_FILE
 # ============================================================
 #  ROUTES — Shared
 # ============================================================
@@ -645,4 +656,59 @@ async def download_logs():
         buffer,
         media_type="application/zip",
         headers={"Content-Disposition": "attachment; filename=all_logs.zip"},
+    )
+    
+
+
+def _zip_dir(folder_path: str, arc_prefix: str) -> io.BytesIO:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        if os.path.isdir(folder_path):
+            for root, _, files in os.walk(folder_path):
+                for filename in files:
+                    filepath = os.path.join(root, filename)
+                    arcname  = os.path.join(arc_prefix, os.path.relpath(filepath, start=folder_path))
+                    zf.write(filepath, arcname=arcname)
+    buffer.seek(0)
+    return buffer
+
+
+@app.get("/download-logs/{folder}")
+async def download_logs_folder(folder: LogFolder):
+    """
+    Download a single logical folder as a zip, instead of everything:
+      /download-logs/events  -> logs/        (extension event logs)
+      /download-logs/pings   -> ping_logs/   (extension ping logs)
+      /download-logs/survey  -> survey_data/ (participants, submissions, progress)
+      /download-logs/codes   -> codes.json alone
+    """
+    if folder == LogFolder.events:
+        buffer, filename = _zip_dir(EVENT_LOG_DIR, "logs"), "events_logs.zip"
+
+    elif folder == LogFolder.pings:
+        buffer, filename = _zip_dir(PING_LOG_DIR, "ping_logs"), "ping_logs.zip"
+
+    elif folder == LogFolder.survey:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, _, files in os.walk(SURVEY_DATA_DIR):
+                for f in files:
+                    filepath = os.path.join(root, f)
+                    arcname  = os.path.relpath(filepath, start=os.path.dirname(SURVEY_DATA_DIR))
+                    zf.write(filepath, arcname=arcname)
+        buffer.seek(0)
+        filename = "survey_data.zip"
+
+    else:  # LogFolder.codes
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            if os.path.isfile(CODES_FILE):
+                zf.write(CODES_FILE, arcname="codes.json")
+        buffer.seek(0)
+        filename = "codes.zip"
+
+    return StreamingResponse(
+        buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
