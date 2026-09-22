@@ -1,0 +1,22 @@
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Python Bytecode
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment Variables (Sensitive Info)
+.env
+
+# Project Specific Logs
+logs/*.json
+ping_logs/
+*.log
+
+# OS Metadata
+.DS_Store
+Thumbs.db
