@@ -31,6 +31,12 @@ SURVEY_PROGRESS_DIR = os.path.join(SURVEY_DATA_DIR, "progress")  # one JSON file
 PARTICIPANTS_FILE   = os.path.join(SURVEY_DATA_DIR, "participants.ndjson")
 SUBMISSIONS_FILE    = os.path.join(SURVEY_DATA_DIR, "submissions.ndjson")
 
+# --- Post-usage survey data dirs ---
+SURVEY_POST_DATA_DIR     = os.getenv("SURVEY_POST_DATA_DIR", os.path.abspath("./survey_post_data"))
+SURVEY_POST_PROGRESS_DIR = os.path.join(SURVEY_POST_DATA_DIR, "progress")
+PARTICIPANTS_POST_FILE   = os.path.join(SURVEY_POST_DATA_DIR, "participants.ndjson")
+SUBMISSIONS_POST_FILE    = os.path.join(SURVEY_POST_DATA_DIR, "submissions.ndjson")
+
 # --- Shared ---
 CODES_FILE     = os.getenv("CODES_FILE",     os.path.abspath("./codes.json"))
 MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", "2000000"))  # 2 MB
@@ -40,6 +46,8 @@ os.makedirs(EVENT_LOG_DIR,       exist_ok=True)
 os.makedirs(PING_LOG_DIR,        exist_ok=True)
 os.makedirs(SURVEY_DATA_DIR,     exist_ok=True)
 os.makedirs(SURVEY_PROGRESS_DIR, exist_ok=True)
+os.makedirs(SURVEY_POST_DATA_DIR,     exist_ok=True)
+os.makedirs(SURVEY_POST_PROGRESS_DIR, exist_ok=True)
 
 
 # ============================================================
@@ -172,7 +180,36 @@ def _participant_exists(prolific_id: str) -> bool:
     return any(r.get("prolific_id") == prolific_id
                for r in _read_all_ndjson(PARTICIPANTS_FILE))
 
+# ============================================================
+#  POST-USAGE SURVEY HELPERS
+# ============================================================
 
+def _progress_post_path(prolific_id: str) -> str:
+    safe = prolific_id.replace("/", "_").replace("..", "_")
+    return os.path.join(SURVEY_POST_PROGRESS_DIR, f"progress_{safe}.json")
+
+def _load_progress_post(prolific_id: str) -> Dict[str, Any]:
+    try:
+        with open(_progress_post_path(prolific_id), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def _save_progress_post(prolific_id: str, data: Dict[str, Any]) -> None:
+    tmp = _progress_post_path(prolific_id) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, _progress_post_path(prolific_id))
+
+def _is_completed_post(prolific_id: str) -> bool:
+    return any(r.get("prolific_id") == prolific_id
+               for r in _read_all_ndjson(SUBMISSIONS_POST_FILE))
+
+def _participant_exists_post(prolific_id: str) -> bool:
+    return any(r.get("prolific_id") == prolific_id
+               for r in _read_all_ndjson(PARTICIPANTS_POST_FILE))
 # ============================================================
 #  SIGNAL HANDLER
 # ============================================================
@@ -262,7 +299,18 @@ class SurveySubmitIn(BaseModel):
     answers: Dict[str, Any]
 
 
+class SurveyPostStartIn(BaseModel):
+    prolific_id: str = Field(..., max_length=64)
 
+class SurveyPostProgressIn(BaseModel):
+    prolific_id: str = Field(..., max_length=64)
+    subsection: str  = Field(..., max_length=32)
+    answers: Dict[str, Any]
+
+class SurveyPostSubmitIn(BaseModel):
+    prolific_id: str = Field(..., max_length=64)
+    answers: Dict[str, Any]
+    
 # ============================================================
 #  Log Folder Enum for download-logs/{folder} route
 # ============================================================
@@ -271,6 +319,7 @@ class LogFolder(str, Enum):
     events = "events"    # EVENT_LOG_DIR
     pings  = "pings"     # PING_LOG_DIR
     survey = "survey"    # SURVEY_DATA_DIR
+    survey_post  = "survey_post"   # SURVEY_POST_DATA_DIR
     codes  = "codes"     # CODES_FILE
 # ============================================================
 #  ROUTES — Shared
@@ -617,6 +666,96 @@ async def survey_submit(payload: SurveySubmitIn):
     return Ok()
 
 
+
+# ============================================================
+#  ROUTES — Post-usage Survey
+#  All prefixed with /survey_post/ — consumed by the post-usage survey frontend.
+# ============================================================
+
+@app.get("/survey_post/check")
+async def survey_post_check(prolific_id: str = Query(..., max_length=64)):
+    """Has this prolific_id already submitted the post-usage survey?"""
+    pid = prolific_id.strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="prolific_id required")
+    return {"exists": _is_completed_post(pid)}
+
+
+@app.post("/survey_post/start", response_model=Ok)
+async def survey_post_start(payload: SurveyPostStartIn):
+    """
+    Called when user enters their Prolific ID and clicks Start
+    on the post-usage survey. Records first arrival. Idempotent.
+    """
+    pid = payload.prolific_id.strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="prolific_id required")
+    if _is_completed_post(pid):
+        raise HTTPException(status_code=409, detail="Already completed")
+    if not _participant_exists_post(pid):
+        _append_ndjson(PARTICIPANTS_POST_FILE, {
+            "prolific_id": pid,
+            "arrived_at":  datetime.now(timezone.utc).isoformat(),
+        })
+    return Ok()
+
+
+@app.post("/survey_post/progress", response_model=Ok)
+async def survey_post_progress(payload: SurveyPostProgressIn):
+    """
+    Called after the user advances past each subsection of the
+    post-usage survey. Merges new answers into the per-user progress
+    file — cumulative, never wipes previous answers.
+    """
+    pid = payload.prolific_id.strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="prolific_id required")
+    if _is_completed_post(pid):
+        return Ok()  # silently succeed — don't touch a completed submission
+
+    progress = _load_progress_post(pid)
+    progress["prolific_id"]     = pid
+    progress["last_subsection"] = payload.subsection
+    progress["last_saved_at"]   = datetime.now(timezone.utc).isoformat()
+
+    existing = progress.get("answers", {})
+    existing.update(payload.answers)
+    progress["answers"] = existing
+
+    _save_progress_post(pid, progress)
+    return Ok()
+
+
+@app.post("/survey_post/submit", response_model=Ok)
+async def survey_post_submit(payload: SurveyPostSubmitIn):
+    """
+    Called on final completion of the post-usage survey.
+    Merges all partial answers into submissions.ndjson, then
+    deletes the progress file. Idempotent.
+    """
+    pid = payload.prolific_id.strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="prolific_id required")
+    if _is_completed_post(pid):
+        return Ok()
+
+    progress = _load_progress_post(pid)
+    final_answers = progress.get("answers", {})
+    final_answers.update(payload.answers)  # final page answers take priority
+
+    _append_ndjson(SUBMISSIONS_POST_FILE, {
+        "prolific_id":  pid,
+        "answers":      final_answers,
+        "submitted_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+    try:
+        os.remove(_progress_post_path(pid))
+    except FileNotFoundError:
+        pass
+
+    return Ok()
+
 # ============================================================
 #  ROUTES — Admin
 # ============================================================
@@ -645,6 +784,12 @@ async def download_logs():
             for filename in files:
                 filepath = os.path.join(root, filename)
                 arcname  = os.path.relpath(filepath, start=os.path.dirname(SURVEY_DATA_DIR))
+                zf.write(filepath, arcname=arcname)
+                
+        for root, _, files in os.walk(SURVEY_POST_DATA_DIR):
+            for filename in files:
+                filepath = os.path.join(root, filename)
+                arcname  = os.path.relpath(filepath, start=os.path.dirname(SURVEY_POST_DATA_DIR))
                 zf.write(filepath, arcname=arcname)
 
         # Shared codes mapping
@@ -698,7 +843,18 @@ async def download_logs_folder(folder: LogFolder):
                     zf.write(filepath, arcname=arcname)
         buffer.seek(0)
         filename = "survey_data.zip"
-
+        
+    elif folder == LogFolder.survey_post:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, _, files in os.walk(SURVEY_POST_DATA_DIR):
+                for f in files:
+                    filepath = os.path.join(root, f)
+                    arcname  = os.path.relpath(filepath, start=os.path.dirname(SURVEY_POST_DATA_DIR))
+                    zf.write(filepath, arcname=arcname)
+        buffer.seek(0)
+        filename = "survey_post_data.zip"
+        
     else:  # LogFolder.codes
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
